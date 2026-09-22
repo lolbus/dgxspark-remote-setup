@@ -1,22 +1,31 @@
 # Unit inventory
 
 One row per physical unit. Update and commit whenever a unit is built, rebuilt, or moved.
-**Do not record unattended-access passwords here** — store those in the team password manager
-and reference them by entry name only.
+**No unattended-access passwords here** — password manager, referenced by entry name.
 
-| Hostname | OEM / model | Physical access | AnyDesk ID | AnyDesk alias | Tailscale IP | Display mode at rest | Autoswitch installed | Last verified |
+| Hostname | OEM / model | Physical access | AnyDesk ID | Tailscale IP | Mode at rest | display-mode.service | Step 7 (live switch) | Last verified |
 |---|---|---|---|---|---|---|---|---|
-| `dxclabs-dgxspark` | Dell Pro Max GB10 | remote only | `1488388644` | — | `100.109.196.102` | dummy (no monitor) | yes | VERIFY-ON-UNIT |
-| `dxclabs-dgxspark-zgx-7701` | HP ZGX Nano GB10 | on-site | VERIFY-ON-UNIT | — | VERIFY-ON-UNIT | dummy (no monitor) | yes | VERIFY-ON-UNIT |
+| `dxclabs-dgxspark` | Dell Pro Max GB10 | remote only | `1488388644` | `100.109.196.102` | headless | enabled | not run (no site access) | TO CONFIRM |
+| `dxclabs-dgxspark-zgx-7701` | HP ZGX Nano GB10 | on-site | TO CONFIRM | TO CONFIRM | headless | enabled | TO CONFIRM | TO CONFIRM |
 
 ## Column meanings
 
-- **Physical access** — `on-site` means a hardware EDID emulator plug is an option for that
-  unit; `remote only` means the software virtual screen is the only route.
-- **Display mode at rest** — what the unit runs with nobody standing at it: `dummy` or
-  `physical`.
-- **Autoswitch installed** — whether `display-autoswitch.service` is enabled on the unit.
+- **Physical access** — `on-site` means Step 7 of the runbook (plug/unplug with
+  `journalctl -t display-mode -f`) can be run. `remote only` means it cannot.
+- **Mode at rest** — what the unit runs with nobody standing at it: `headless` or `physical`.
+- **display-mode.service** — enabled on the unit, per `systemctl is-enabled`.
+- **Step 7** — `passed`, or `not run` with the reason. Do not write `passed` for a unit
+  where nobody plugged a monitor in.
 - **Last verified** — date `scripts/healthcheck.sh` last exited 0 on that unit.
+
+## Per-unit deviations
+
+Record anything that differs from the stock procedure — most likely a raised `UNPLUG_POLLS`
+where a monitor drops signal when powered off.
+
+| Hostname | Deviation | Why |
+|---|---|---|
+| — | — | — |
 
 ## Adding a unit
 

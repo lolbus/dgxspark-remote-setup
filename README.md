@@ -1,108 +1,93 @@
-# DGX Spark — Virtual Display + AnyDesk Remote Runbook
+# DGX Spark — adaptive display + AnyDesk remote runbook
 
-Rapid, repeatable setup for **headless AnyDesk remote desktop on NVIDIA DGX Spark / GB10 units
-running Ubuntu 24.04 ARM64**, including automatic switching between a virtual (dummy) screen
-when no monitor is attached and the unit's normal display config when one is plugged in.
+Rapid, repeatable headless remote access for **NVIDIA DGX Spark / GB10 units on Ubuntu 24.04
+ARM64 (DGX OS)**: a dummy X screen when no monitor is attached, the unit's own monitor
+config when one is, switched automatically.
 
-This repo is the reference a **new DGX Spark unit** should be pointed at. The fast path is
-[`docs/06-new-unit-runbook.md`](docs/06-new-unit-runbook.md) — roughly 15 minutes per unit.
+Point a new unit at [`docs/06-new-unit-runbook.md`](docs/06-new-unit-runbook.md).
 
 ---
 
-## The problem this solves
+## Source of truth
 
-A DGX Spark with no monitor attached has no connected DRM connector. Xorg therefore starts
-with no screen (or does not start at all), so AnyDesk has nothing to capture. Symptoms:
+[`Manual-Direct-commands.txt`](Manual-Direct-commands.txt) is the procedure that was built
+and validated on `dxclabs-dgxspark`. Everything in `scripts/` and `config/` is extracted
+from it; `docs/` explains it. **If a file here disagrees with that one, that one wins.**
 
-| Symptom | Underlying cause |
-|---|---|
-| AnyDesk connects, screen is black or 640x480 | X started with no real mode / fell back |
-| `Display server is not supported` in the AnyDesk window | The session is Wayland, not X11 |
-| AnyDesk service running but unit shows offline / no ID | AnyDesk started before any X server existed |
-| Desktop appears only while a monitor is plugged in | No virtual screen configured |
+Content that is *not* from that procedure is marked as such at the top of the page. Today
+that is: `docs/03-anydesk-install.md`, `scripts/install-anydesk.sh`, `scripts/preflight.sh`
+and `scripts/healthcheck.sh`.
 
-The fix is a **dummy Xorg screen** that exists whether or not hardware is attached, plus a
-**hotplug-driven switcher** so a physically attached monitor still works normally.
-
-## What gets installed
+## How it works
 
 ```
-                 +-------------------------+
-   DRM hotplug   |  udev rule              |
-   (monitor in/  |  99-drm-hotplug.rules   |
-    monitor out) +-----------+-------------+
-                             | starts (no-block)
-                 +-----------v-------------+
-                 | display-autoswitch      |   oneshot systemd unit
-                 | .service                |   also runs at boot,
-                 +-----------+-------------+   before display-manager
-                             |
-                 +-----------v-------------+
-                 | display-autoswitch.sh   |
-                 | reads /sys/class/drm/*  |
-                 +-----+-------------+-----+
-                       |             |
-       no monitor ->   |             |   <- monitor connected
-    /etc/X11/xorg.conf |             | /etc/X11/xorg.conf
-    := xorg.conf.dummy |             | := xorg.conf.physical (or removed
-    (1920x1080 virtual)|             |  entirely, = stock auto-detect)
-                       +------+------+
-                              | restart display-manager ONLY if changed
-                       +------v------+
-                       | GDM (X11)   | WaylandEnable=false
-                       +------+------+
-                              |
-                       +------v------+
-                       | AnyDesk     | unattended password, arm64 .deb
-                       +-------------+
+/etc/X11/display-modes/physical.conf   the unit's own DGX OS xorg.conf (Driver "nvidia")
+/etc/X11/display-modes/headless.conf   dummy driver, 1920x1080
+                  |
+/usr/local/sbin/display-mode.sh
+   boot   -> wait up to 30s for nvidia-smi, pick the config, before GDM starts
+   watch  -> poll every 5s; switch config + restart GDM when the state changes
+                  |
+display-mode.service   ExecStartPre=... boot / ExecStart=... watch / Restart=always
 ```
+
+Monitor detection is `nvidia-xconfig --query-gpu-info` → *Number of Display Devices*.
+
+| Parameter | Value | Effect |
+|---|---|---|
+| `POLL` | `5` | Seconds between checks |
+| `PLUG_POLLS` | `2` | ~10 s of monitor present → physical |
+| `UNPLUG_POLLS` | `24` | ~120 s of monitor absent → headless |
+
+Fast in, slow out: every switch restarts GDM and logs the desktop out, so a monitor blip
+must not be able to bounce the box.
 
 ## Quick start (on the unit, over SSH)
 
-> Do this over **SSH**, never over AnyDesk. The installer restarts the display manager,
-> which kills any AnyDesk session you are sitting in.
+> Over **SSH**, never over AnyDesk — switches restart the display manager.
 
 ```bash
-git clone <this-repo-url> dgx-virtualscreen && cd dgx-virtualscreen
-sudo ./scripts/preflight.sh                 # reports, changes nothing
-sudo ./scripts/install-virtual-display.sh   # dummy screen + autoswitch + X11 forcing
-sudo ./scripts/install-anydesk.sh           # arm64 AnyDesk + unattended password
-./scripts/healthcheck.sh                    # one-screen status, exit 0 = good
+git clone <this-repo-url> dgx-display-mode && cd dgx-display-mode
+sudo ./scripts/preflight.sh              # reports, changes nothing
+sudo ./scripts/install-display-mode.sh   # installs; nothing switches until reboot
+# unplug any monitor, then:
+sudo reboot
+# ssh back in:
+./scripts/verify-display-mode.sh
+sudo ./scripts/install-anydesk.sh --set-password --open-firewall
+./scripts/healthcheck.sh
 
-sudo ./scripts/uninstall.sh                 # rollback to stock (DESTRUCTIVE)
+sudo ./scripts/rollback.sh               # back to stock (DESTRUCTIVE, reboots)
 ```
-
-`scripts/install-anydesk.sh` prints the unit's AnyDesk ID at the end. Record it in
-[`UNIT-INVENTORY.md`](UNIT-INVENTORY.md) and commit.
 
 ## Repo layout
 
 | Path | What it is |
 |---|---|
-| `docs/01-overview.md` | Why headless AnyDesk breaks, the three options, why this one |
-| `docs/02-prerequisites.md` | Everything needed before you start, including what is assumed already present |
-| `docs/03-anydesk-install.md` | AnyDesk arm64 install, unattended access, service |
-| `docs/04-virtual-display.md` | The dummy Xorg screen and its alternatives |
-| `docs/05-autoswitch.md` | Hotplug detection, the switcher, the systemd/udev wiring |
-| `docs/06-new-unit-runbook.md` | **The 15-minute path for a brand-new unit** |
-| `docs/07-verification.md` | Post-install checks, each with a pass/fail branch |
-| `docs/08-troubleshooting.md` | Sequential diagnostics — follow the branches, do not skim |
-| `scripts/` | Idempotent installers, the switcher, health check, uninstall |
-| `config/` | Xorg variants, udev rule, systemd unit — the files the scripts install |
-| `UNIT-INVENTORY.md` | Per-unit record: hostname, AnyDesk ID, Tailscale IP, state |
+| `Manual-Direct-commands.txt` | **The validated procedure. Source of truth** |
+| `docs/01-overview.md` | The mechanism, the timing, the boot ordering |
+| `docs/02-prerequisites.md` | What must be true before you start |
+| `docs/03-anydesk-install.md` | AnyDesk arm64 + unattended access *(not validated here)* |
+| `docs/04-display-modes.md` | The two Xorg configs |
+| `docs/05-switcher.md` | `display-mode.sh` and its service |
+| `docs/06-new-unit-runbook.md` | **The path for a new unit** |
+| `docs/07-verification.md` | Steps 7–8, with what each check proves |
+| `docs/08-troubleshooting.md` | Sequential diagnostics — follow the branches |
+| `scripts/display-mode.sh` | Extracted verbatim from the manual procedure |
+| `scripts/install-display-mode.sh` | Automates manual Steps 1–5 |
+| `scripts/verify-display-mode.sh` | Manual Step 7, as one command |
+| `scripts/rollback.sh` | The manual Rollback line |
+| `scripts/preflight.sh`, `scripts/healthcheck.sh` | Additions: pre-checks and a pass/fail gate |
+| `config/headless.conf`, `config/display-mode.service` | Extracted verbatim |
+| `UNIT-INVENTORY.md` | Per-unit record |
 
-## Scope and assumptions
+## Known behaviour
 
-- NVIDIA GB10 (DGX Spark class), 128 GB unified memory, **Ubuntu 24.04 ARM64 / DGX OS 7**.
-- GNOME on GDM3. If the unit runs a different display manager, see `docs/08-troubleshooting.md`.
-- An out-of-band shell (SSH, ideally over Tailscale) already works. **This is mandatory** —
-  it is the only way back in if the display stack fails to come up.
-
-## Markers used in these docs
-
-- `VERIFY-ON-UNIT` — value or path that differs between units or driver versions. Confirm it
-  on the box before copying. Do not propagate an unverified value into a new unit's config.
-- `DESTRUCTIVE` — the step restarts the display manager or logs out the desktop session.
+- Every switch restarts GDM, so any open desktop session — local or AnyDesk — is logged out.
+  SSH, tmux, containers and model jobs are unaffected.
+- The headless desktop is software-rendered. CUDA and compute workloads are untouched.
+- A monitor that drops its signal when powered off counts as unplugged, and the unit goes
+  headless 120 s later. Raise `UNPLUG_POLLS` if that is a problem on site.
 
 ## Contributors
 

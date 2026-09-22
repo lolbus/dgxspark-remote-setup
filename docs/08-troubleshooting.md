@@ -1,8 +1,7 @@
 # 08 — Troubleshooting
 
-Work this from **Step 1 downwards**. Each step ends with branches: one tells you to stop and
-apply a fix, the other tells you to continue. Do not jump to the step whose title matches
-your symptom — the earlier steps rule out the causes that make later diagnosis misleading.
+Work from **Step 1 downwards**. Each step ends in branches: one says stop and apply a fix,
+the other says continue. Do not jump to the step whose title matches your symptom.
 
 Everything here is run over SSH.
 
@@ -15,119 +14,117 @@ systemctl is-active ssh || systemctl is-active sshd
 tailscale ip -4 2>/dev/null
 ```
 
-- **Result: `active` and an IP printed** → you can safely restart the display stack.
-  Continue to Step 2.
-- **Result: inactive, or no route** → **stop.** Restore SSH first (`sudo systemctl enable
-  --now ssh`, check UFW allows 22/tcp on the relevant interface). Do not run any command
-  below this line until this passes; several of them restart the display manager.
+- **`active` and an IP** → continue to Step 2.
+- **Inactive, or no route** → **stop.** Restore SSH (`sudo systemctl enable --now ssh`,
+  check UFW allows 22/tcp). Nothing below is safe without it: every fix here restarts GDM.
 
 ---
 
-## Step 2 — Confirm what the kernel sees
+## Step 2 — Confirm the switcher can see monitors at all
 
 ```bash
-grep -H . /sys/class/drm/card*-*/status
+which nvidia-xconfig
+nvidia-xconfig --query-gpu-info | grep -E "Number of Display Devices|EDID Name"
 ```
 
-- **Result: every connector `disconnected`, no monitor attached** → expected headless state.
-  Continue to Step 3.
-- **Result: a connector reports `connected` and nothing is physically plugged in** → a
-  phantom connector is pinning the unit into physical mode. **Stop here and fix:** add that
-  connector's name to the exclusion `case` in `physical_connector()` in
-  `scripts/display-autoswitch.sh`, reinstall it
-  (`sudo install -m 0755 scripts/display-autoswitch.sh /usr/local/sbin/display-autoswitch.sh`),
-  then `sudo /usr/local/sbin/display-autoswitch.sh --force`. Re-run Step 2.
-- **Result: no files matched at all** → the DRM subsystem is not exposing connectors.
-  **Stop here and fix:** check `cat /sys/module/nvidia_drm/parameters/modeset` returns `Y`;
-  if it returns `N`, set `nvidia-drm.modeset=1` on the kernel command line, reboot, and
-  re-run Step 2. VERIFY-ON-UNIT: the parameter name differs on some DGX OS builds.
+- **A count is printed, and it matches reality** (0 with nothing attached) → continue to
+  Step 3.
+- **`nvidia-xconfig: command not found`** → **stop and fix.** `monitor_present()` reads as
+  zero without it, so the unit pins to headless and will never come back to a monitor.
+  Reinstall the NVIDIA driver tooling, then re-run Step 2.
+- **Command exists but prints nothing** → **stop and fix.** Usually the driver is not up.
+  Check `nvidia-smi -L`. If the driver is fine and the query is still empty, the detection
+  method does not work on this unit and the whole approach needs revisiting — paste the
+  output rather than working around it.
+- **A count is printed but it is wrong** (0 with a monitor attached, or the reverse) →
+  **stop and fix.** Check the cable and that the monitor is powered. A monitor that drops
+  signal when powered off reads as absent — that is expected behaviour, see Step 6.
 
 ---
 
-## Step 3 — Confirm the switcher ran and agreed with Step 2
+## Step 3 — Confirm the service is running
 
 ```bash
-/usr/local/sbin/display-autoswitch.sh --status
-sudo tail -40 /var/log/display-autoswitch.log
+systemctl is-enabled display-mode.service
+systemctl is-active display-mode.service
+systemctl status display-mode.service --no-pager | tail -20
 ```
 
-- **Result: `desired_mode` equals `current_mode`, and it matches Step 2** (no monitor →
-  `dummy`) → the switcher is correct. Continue to Step 4.
-- **Result: the modes disagree, and the log shows no recent entry** → the switcher never
-  ran. **Stop here and fix:** `sudo systemctl start display-autoswitch.service`, then
-  `systemctl status display-autoswitch.service`. Re-run Step 3.
-- **Result: the log shows `FATAL: ... missing or empty`** → the variant files are not
-  installed. **Stop here and fix:** re-run `sudo ./scripts/install-virtual-display.sh`.
+- **enabled and active** → continue to Step 4.
+- **Not enabled** → **stop and fix:** `sudo systemctl enable --now display-mode.service`.
   Re-run Step 3.
-- **Result: the modes agree but are the wrong way round** (headless unit in `physical`) →
-  you are in the Step 2 phantom-connector case. Go back to Step 2.
+- **Enabled but inactive, restarting in a loop** → read the status output. `Restart=always`
+  with `RestartSec=5` means a failing script retries every 5 s and fills the journal. The
+  usual cause is `/usr/local/sbin/display-mode.sh` missing or not executable. Re-run
+  `sudo ./scripts/install-display-mode.sh`, then re-run Step 3.
 
 ---
 
-## Step 4 — Confirm hotplug switching will work (skip on a permanently headless unit)
+## Step 4 — Confirm the decision reached disk
 
 ```bash
-sudo udevadm trigger --subsystem-match=drm --action=change
-sudo journalctl -u display-autoswitch.service -n 20 --no-pager
+journalctl -t display-mode -b --no-pager | tail -20
+cmp -s /etc/X11/xorg.conf /etc/X11/display-modes/headless.conf && echo HEADLESS
+cmp -s /etc/X11/xorg.conf /etc/X11/display-modes/physical.conf && echo PHYSICAL
 ```
 
-- **Result: the unit ran within a few seconds** → hotplug wiring is good. Continue to Step 5.
-- **Result: nothing ran** → the udev rule is not loaded. **Stop here and fix:** confirm
-  `/etc/udev/rules.d/99-drm-hotplug.rules` exists, then
-  `sudo udevadm control --reload-rules && sudo udevadm trigger`. Re-run Step 4.
-- **Result: it ran but errored** → read the error in `journalctl`; it is a script problem,
-  not a udev problem. Continue to Step 5 only after the unit exits 0.
+- **A `switched to ...` line, and the live config matches it and matches Step 2** →
+  continue to Step 5.
+- **No journal entries this boot at all** → the boot branch exited early. That is what
+  `systemctl is-active --quiet gdm && exit 0` does when GDM is already up, which is correct
+  on a service restart but means the mode was never re-decided. Force it:
+  `sudo /usr/local/sbin/display-mode.sh watch` in a terminal for one poll cycle, or reboot.
+  Re-run Step 4.
+- **A `switched to` line, but neither `cmp` matches** → `set_mode` wrote nothing, or
+  `xorg.conf` was hand-edited afterwards. **Stop and fix:** check disk space (`df -h /`) and
+  permissions on `/etc/X11/`, then
+  `sudo cp /etc/X11/display-modes/headless.conf /etc/X11/xorg.conf`. Re-run Step 4.
+- **The log says `physical` with no monitor attached** → go back to Step 2, last branch.
 
 ---
 
-## Step 5 — Confirm an X server exists with a real mode
+## Step 5 — Confirm Xorg came up on the right driver
 
 ```bash
-systemctl is-active display-manager.service
-pgrep -a Xorg
-XAUTH=$(sudo find /run/user -maxdepth 3 -name 'Xauthority' | head -1)
-sudo DISPLAY=:0 XAUTHORITY="$XAUTH" xrandr | head
+systemctl is-active gdm
+grep -h 'LoadModule: "dummy"' /var/log/Xorg.0.log \
+     /var/lib/gdm3/.local/share/xorg/Xorg.0.log 2>/dev/null
+sudo grep -E '\(EE\)' /var/log/Xorg.0.log | tail -20
 ```
 
-- **Result: display-manager active, an Xorg process, and `xrandr` lists a mode with `*`** →
-  the screen exists. Continue to Step 6.
-- **Result: display-manager active but no Xorg process** → X is crashing at startup.
-  **Stop here and fix:** `sudo grep -E '\(EE\)' /var/log/Xorg.0.log | tail -20`. The usual
-  cause is a bad modeline or `Virtual` smaller than the largest mode in
-  `/etc/X11/autoswitch/xorg.conf.dummy`. Fix the variant, reinstall it, re-run Step 5.
-- **Result: Xorg running but `xrandr` shows no `*` mode** → the dummy screen has no active
-  mode. **Stop here and fix:** `sudo DISPLAY=:0 XAUTHORITY="$XAUTH" xrandr -s 1920x1080`.
-  If that fails, the modelines in the dummy config are wrong — regenerate with
-  `cvt 1920 1080 60`. Re-run Step 5.
-- **Result: display-manager inactive** → **stop here and fix:**
-  `sudo systemctl restart display-manager.service`, wait 10s, re-run Step 5. If it will not
-  stay up, `journalctl -u display-manager -n 50 --no-pager`.
+- **`gdm` active, a `LoadModule: "dummy"` line in headless mode, no `(EE)` lines** →
+  continue to Step 6.
+- **`gdm` active but no dummy line while headless** → Xorg ignored the config or fell back.
+  **Stop and fix:** confirm `xserver-xorg-video-dummy` is installed
+  (`dpkg -l xserver-xorg-video-dummy`), then `sudo systemctl restart gdm`. Re-run Step 5.
+- **`gdm` inactive** → **stop and fix:** `sudo systemctl restart gdm`, wait 15 s, re-run
+  Step 5. If it will not stay up, `journalctl -u gdm -n 50 --no-pager`.
+- **`(EE)` lines naming the dummy device** → the headless config is wrong for this unit.
+  Roll back (`sudo ./scripts/rollback.sh --no-reboot`) to get the monitor config live, then
+  fix `headless.conf` before re-enabling.
 
 ---
 
-## Step 6 — Confirm the session is X11, not Wayland
+## Step 6 — Confirm the switch timing is behaving
+
+Only relevant if switching happens but at the wrong time.
 
 ```bash
-grep -iE 'WaylandEnable' /etc/gdm3/custom.conf
-loginctl list-sessions
-loginctl show-session <id> -p Type
+grep -E '^(POLL|PLUG_POLLS|UNPLUG_POLLS)=' /usr/local/sbin/display-mode.sh
+journalctl -t display-mode --since '1 hour ago' --no-pager
 ```
 
-- **Result: `WaylandEnable=false` and session `Type=x11`** → capture will work. Continue to
-  Step 7.
-- **Result: `Type=wayland`, or WaylandEnable is absent/commented** → this is the cause of
-  `Display server is not supported` and of most black screens. **Stop here and fix:** set
-  `WaylandEnable=false` in `/etc/gdm3/custom.conf` under `[daemon]`, then
-  `sudo systemctl restart display-manager.service`. Wait 15s, re-run Step 6.
-- **Result: `WaylandEnable=false` but the session is still wayland** → an AccountsService
-  override is forcing it. **Stop here and fix:** check
-  `/var/lib/AccountsService/users/<username>` for an `XSession=` line and set it to
-  `ubuntu-xorg` (VERIFY-ON-UNIT: the session name on this Ubuntu build — list them with
-  `ls /usr/share/xsessions/`). Restart the display manager, re-run Step 6.
+- **Switches at ~10 s in and ~120 s out** → working as designed. Continue to Step 7.
+- **Unit goes headless whenever somebody switches the monitor off** → expected: a monitor
+  that drops its signal when powered off counts as unplugged. **Fix:** raise `UNPLUG_POLLS`
+  in `/usr/local/sbin/display-mode.sh` *and* in this repo's `scripts/display-mode.sh`, then
+  `sudo systemctl restart display-mode.service`.
+- **Repeated switches, desktop logging out every couple of minutes** → detection is
+  flapping. Go back to Step 2 and check the cable and monitor power before changing timings.
 
 ---
 
-## Step 7 — Confirm AnyDesk is registered and attached
+## Step 7 — Confirm AnyDesk
 
 ```bash
 systemctl is-active anydesk
@@ -135,46 +132,29 @@ anydesk --get-id
 sudo journalctl -u anydesk -n 50 --no-pager
 ```
 
-- **Result: active, and an ID is printed** → the unit is reachable. Continue to Step 8.
-- **Result: active, but `--get-id` prints nothing** → the unit cannot reach AnyDesk's
-  network. **Stop here and fix:** confirm outbound TCP 443 and 6568 are permitted from this
-  unit (proxy, UFW, corporate egress). Re-run Step 7 after 60s.
-- **Result: inactive** → **stop here and fix:** `sudo systemctl enable --now anydesk`, then
-  `journalctl -u anydesk -n 50`. Re-run Step 7.
-
----
-
-## Step 8 — Confirm what the client actually sees
-
-Connect with the AnyDesk client from another machine.
-
-- **Result: a usable desktop** → the unit is healthy; record it in `UNIT-INVENTORY.md`.
-- **Result: prompted to accept on the remote side** → no unattended password is set.
-  **Fix:** `sudo ./scripts/install-anydesk.sh --set-password`.
-- **Result: the GDM greeter instead of a desktop** → autologin is not enabled. **Fix:**
-  `sudo ./scripts/install-virtual-display.sh --autologin <user>` and reboot. Harmless if you
-  are content to type the account password remotely each reboot.
-- **Result: black screen, but Steps 5–7 all passed** → AnyDesk is attached to a stale X
-  server. **Fix:** `sudo systemctl restart anydesk`, wait 10s, reconnect. If it recurs after
-  every display-manager restart, add an `After=display-manager.service` drop-in to the
-  anydesk unit.
-- **Result: desktop appears then the session drops every ~30 s** → the display manager is
-  restarting in a loop, almost always because the switcher is flapping between modes.
-  **Fix:** go back to Step 2; a phantom connector toggling state is the usual cause. Raise
-  `DEBOUNCE_SECONDS` via a systemd drop-in if the connector genuinely flaps.
-- **Result: screen is 640x480 or similarly tiny** → X fell back to a default mode. Go back
-  to Step 5, third branch.
+- **Active, an ID printed, and a usable desktop from the client** → the unit is healthy.
+  Record it in `UNIT-INVENTORY.md`.
+- **Active, `--get-id` empty** → outbound TCP 443/6568 blocked. **Fix** the egress path,
+  wait 60 s, re-run Step 7.
+- **Inactive** → `sudo systemctl enable --now anydesk`, re-run Step 7.
+- **Black screen, but Steps 4–5 passed** → AnyDesk is attached to the X server that was torn
+  down by the last GDM restart. **Fix:** `sudo systemctl restart anydesk`, wait 10 s,
+  reconnect.
+- **Prompted to accept on the remote side** → no unattended password.
+  `sudo ./scripts/install-anydesk.sh --set-password`.
+- **GDM greeter instead of a desktop** → no autologin configured. That is stock behaviour;
+  either type the account password over AnyDesk each reboot, or enable autologin in
+  `/etc/gdm3/custom.conf` and accept that anyone with physical access gets a logged-in
+  desktop. The validated build did not enable it.
 
 ---
 
 ## Last resort
 
 ```bash
-sudo ./scripts/uninstall.sh      # DESTRUCTIVE: restarts the display manager
+sudo ./scripts/rollback.sh          # restores physical.conf, disables the service, reboots
 ```
 
-This restores the unit's original `/etc/X11/xorg.conf` and `/etc/gdm3/custom.conf` from
-`/var/backups/dgx-virtualscreen/`, removes the switcher, and unmasks the sleep targets.
-AnyDesk is left installed. After this the unit is back to stock behaviour — which, on a
-headless box, means no usable remote desktop. Use it to get a clean base before re-running
-the runbook, not as a fix.
+After this the unit is back to its pre-install state — which, with no monitor attached,
+means no usable remote desktop. Use it to get a clean base before re-running
+[`06-new-unit-runbook.md`](06-new-unit-runbook.md) from Step 2, not as a fix.

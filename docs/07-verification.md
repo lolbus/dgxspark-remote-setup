@@ -1,64 +1,58 @@
 # 07 — Verification
 
-`scripts/healthcheck.sh` runs all of this. This page is what each check means, so a failure
-tells you something instead of just being red.
+> **Provenance.** Steps 7 and 8 of
+> [`../Manual-Direct-commands.txt`](../Manual-Direct-commands.txt).
+> `scripts/verify-display-mode.sh` runs the Step 7 command set and prints these branches
+> alongside the output. `scripts/healthcheck.sh` is an addition, not part of that procedure.
 
-Run it as root to include the resolution check:
+## Step 7 — headless mode, over SSH
+
+The original command set:
 
 ```bash
-sudo ./scripts/healthcheck.sh
+journalctl -t display-mode -b --no-pager
+cmp -s /etc/X11/xorg.conf /etc/X11/display-modes/headless.conf && echo "XORG.CONF = HEADLESS"
+grep -h 'LoadModule: "dummy"' /var/log/Xorg.0.log \
+     /var/lib/gdm3/.local/share/xorg/Xorg.0.log 2>/dev/null
+systemctl is-active display-mode gdm
 ```
 
-## What each check proves
+| Output | Means |
+|---|---|
+| `switched to headless` + `XORG.CONF = HEADLESS` + a `LoadModule: "dummy"` line + `active` twice + AnyDesk shows the login screen | Headless mode works. Go to Step 8 |
+| `switched to physical` with no monitor attached | Stop. Detection is wrong — paste the whole output |
+| Headless, but `gdm` not active, or AnyDesk still black | Stop. Paste `systemctl status gdm --no-pager` |
 
-| Check | Passes when | A failure means |
+## Step 8 — live switching, at the unit
+
+```bash
+journalctl -t display-mode -f
+```
+
+| Action | Expected | If not |
 |---|---|---|
-| `sshd active` | The recovery channel exists | You are one bad Xorg config away from a site visit. Fix before anything else |
-| `tailscale ip` | The unit is on the tailnet | Only a warning if the unit is reachable another way |
-| `physical monitor` | Connector states were read | Lists the connectors; this is the input the switcher decides on |
-| `mode matches hardware` | Detected hardware and installed config agree | The switcher did not run, or ran and failed. Log: `/var/log/display-autoswitch.log` |
-| `display-autoswitch.service enabled` | It will run on the next boot | The unit will come back from a reboot in the wrong mode |
-| `hotplug udev rule present` | Plugging a monitor in will be noticed | Hotplug switching is dead; boot-time switching still works |
-| `GDM pinned to X11` | `WaylandEnable=false` | AnyDesk will show `Display server is not supported` or a black screen |
-| `display-manager active` | GDM is up | No X server, therefore nothing for AnyDesk to capture |
-| `Xorg running` | An X server process exists | Same as above. Check `/var/log/Xorg.0.log` |
-| `active resolution` | `xrandr` reports a mode | A dummy screen with no mode means the modelines or `Virtual` are wrong |
-| `anydesk package / service` | Installed and running | The ID is only registered while the service runs |
-| `AnyDesk ID` | An ID was assigned | Empty means outbound 443/6568 is blocked, or the service has not reached the relay yet |
-| `sleep targets masked` | The unit cannot suspend itself | A warning, not a failure — but a remote-only unit that suspends is unreachable |
+| Plug the monitor in | `switched to physical` within ~10 s, login screen on the monitor | Nothing within 30 s → Ctrl+C and run `sudo nvidia-xconfig --query-gpu-info \| grep -E "Number of Display Devices\|EDID Name"` with the monitor attached |
+| Unplug the monitor | `switched to headless` about 120 s later, AnyDesk works again | Longer than ~3 min → check `UNPLUG_POLLS` and that the watcher is running |
 
-## Manual spot checks
+## What each check actually proves
 
-```bash
-# the decision log — read this first, always
-sudo tail -40 /var/log/display-autoswitch.log
+| Check | Proves |
+|---|---|
+| `switched to ...` in the journal | The switcher ran and made a decision. No line at all means the service never started |
+| `XORG.CONF = HEADLESS` | The decision reached disk. A decision in the log with the wrong file live means `set_mode` failed — permissions or a full disk |
+| `LoadModule: "dummy"` | Xorg actually loaded the dummy driver, rather than falling back. Without this the screen may exist but be unusable |
+| `systemctl is-active display-mode gdm` | The watcher survives, and GDM came back after the switch |
+| AnyDesk shows the login screen | End to end: a screen exists and AnyDesk can capture it |
 
-# what config is actually live
-ls -l /etc/X11/xorg.conf && head -5 /etc/X11/xorg.conf
+## Acceptance criteria
 
-# which driver X actually loaded (should say "dummy" in headless mode)
-sudo grep -iE 'Loading.*(dummy|nvidia)|Screen.*initialised|(EE)' /var/log/Xorg.0.log | tail -20
-
-# session type of the logged-in desktop — must be x11
-loginctl list-sessions
-loginctl show-session <id> -p Type
-
-# AnyDesk's own view
-anydesk --get-id
-sudo journalctl -u anydesk -n 50 --no-pager
-```
-
-## Acceptance criteria for calling a unit done
-
-1. `healthcheck.sh` exits 0 with no FAIL lines.
+1. `verify-display-mode.sh` shows the Step 7 pass pattern.
 2. An AnyDesk connection from another machine reaches a usable 1920x1080 desktop using only
    the ID and the unattended password, with nobody at the unit.
 3. After `sudo reboot`, criterion 2 still holds with no manual step.
-4. The unit's row exists in `UNIT-INVENTORY.md` with today's date.
+4. Step 8 passed, or the unit is recorded as remote-only with Step 8 untested.
+5. The unit's row exists in `UNIT-INVENTORY.md` with today's date.
 
-Criterion 3 is the one people skip. It is also the only one that proves the unit survives a
-power cut.
-
-If a unit cannot be made to pass, roll it back to stock with `sudo ./scripts/uninstall.sh`
-and re-run [`06-new-unit-runbook.md`](06-new-unit-runbook.md) from Step 2 rather than
-layering fixes on a half-built unit.
+Criterion 3 is the one people skip, and the only one that proves the unit survives a power
+cut. If a unit cannot be made to pass, roll it back with `sudo ./scripts/rollback.sh` and
+re-run from Step 2 rather than layering fixes on a half-built unit.

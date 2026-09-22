@@ -1,45 +1,43 @@
-# 06 — New unit runbook (the fast path)
+# 06 — New unit runbook
 
-Target: a factory-fresh or reimaged GB10 unit, remote-capable via AnyDesk, in about 15
-minutes. Every step is run **over SSH**. Nothing here is done over AnyDesk, because two of
-the steps restart the display manager and would cut your own session.
+> **Provenance.** These are Steps 1–8 of
+> [`../Manual-Direct-commands.txt`](../Manual-Direct-commands.txt), the procedure validated
+> on `dxclabs-dgxspark`, with the file installs wrapped in a script. The manual file remains
+> the source of truth — if you prefer to run the commands by hand, run them from there.
+
+Run everything over **SSH**. Every mode switch restarts GDM, so an AnyDesk session is not a
+safe place to do this from.
 
 If a step fails, stop and go to [`08-troubleshooting.md`](08-troubleshooting.md). Do not
-continue past a failed step hoping a later one fixes it.
+continue past a failed step.
 
-**Rollback, at any point from Step 3 onwards:**
+**Rollback, at any point after Step 3:**
 
 ```bash
-sudo ./scripts/uninstall.sh      # DESTRUCTIVE: restarts the display manager
+sudo ./scripts/rollback.sh              # restores physical.conf, disables the service, reboots
+sudo ./scripts/rollback.sh --no-reboot  # same, without the reboot
 ```
-
-It restores the unit's original `/etc/X11/xorg.conf` and `/etc/gdm3/custom.conf` from
-`/var/backups/dgx-virtualscreen/`, removes the switcher and unmasks the sleep targets.
-AnyDesk is left installed. This returns the unit to stock — on a headless box that means
-no usable remote desktop, so it is how you get a clean base to re-run from, not a fix.
 
 ---
 
-## Step 0 — Establish the recovery channel (before anything else)
+## Step 0 — Recovery channel
 
 ```bash
 ssh <admin>@<unit-address>
 sudo systemctl enable --now ssh
-sudo tailscale up            # if this unit joins the tailnet
+sudo tailscale up          # if this unit joins the tailnet
 tailscale ip -4
 ```
 
-Write the Tailscale IP into `UNIT-INVENTORY.md` now, not later. Everything after this point
-can break the display; SSH is how you get back.
+Record the Tailscale IP in `UNIT-INVENTORY.md` now.
 
-## Step 1 — Get the repo onto the unit
+## Step 1 — Repo onto the unit
 
 ```bash
-git clone <this-repo-url> ~/dgx-virtualscreen
-cd ~/dgx-virtualscreen
+git clone <this-repo-url> ~/dgx-display-mode && cd ~/dgx-display-mode
 ```
 
-No git access on the unit? From your machine: `scp -r <repo-dir> <admin>@<unit>:~/dgx-virtualscreen`
+No git on the unit? `scp -r <repo-dir> <admin>@<unit>:~/dgx-display-mode`
 
 ## Step 2 — Survey (changes nothing)
 
@@ -47,92 +45,106 @@ No git access on the unit? From your machine: `scp -r <repo-dir> <admin>@<unit>:
 sudo ./scripts/preflight.sh
 ```
 
-Read the `DRM connectors` block and the `Blocking conditions` block.
+- Exit 0 → continue to Step 3.
+- `BLOCKER: no active SSH server` → stop, fix SSH, re-run.
+- `BLOCKER: nvidia-xconfig missing` → stop. The switcher cannot detect monitors without it
+  and would pin the unit to headless forever.
+- `BLOCKER: no /etc/X11/xorg.conf` → stop. There is nothing to save as `physical.conf`.
+  Generate one with a monitor attached (`sudo nvidia-xconfig`), confirm the desktop works on
+  that monitor, then re-run.
 
-- Exit 0, and every connector `disconnected` → normal headless unit. Continue to Step 3.
-- Exit 0, and one connector `connected` with nothing physically plugged in → a phantom
-  connector. Note its name; you may need it in Step 6. Continue to Step 3.
-- Exit 1 (`BLOCKER: no active SSH server`) → **stop**. Fix SSH, then re-run Step 2.
-
-Keep the output; paste it into the unit's build record.
-
-## Step 3 — Install the virtual display and the switcher
-
-DESTRUCTIVE: restarts the display manager.
+## Step 3 — Install (manual Steps 1–5)
 
 ```bash
-sudo ./scripts/install-virtual-display.sh --autologin <admin-username>
+sudo ./scripts/install-display-mode.sh
 ```
 
-Drop `--autologin` only if this unit must show the GDM greeter on every reboot and somebody
-will type the account password remotely each time.
+This installs `xserver-xorg-video-dummy`, copies the unit's `xorg.conf` to
+`physical.conf`, writes `headless.conf`, installs `display-mode.sh` and
+`display-mode.service`, and enables the service.
 
-The script ends by printing `current_mode=`.
+**Nothing switches yet.** That is deliberate — the boot path is what Step 5 tests.
 
-- On a headless unit it must say `dummy` → continue to Step 4.
-- It says `physical` on a unit with no monitor → phantom connector.
-  [`08-troubleshooting.md`](08-troubleshooting.md) Step 2.
-- The script aborted, or SSH survived but the unit is otherwise wedged → roll back with
-  `sudo ./scripts/uninstall.sh`, then diagnose before re-running Step 3.
+- Script prints the `Driver "nvidia"` line and finishes → continue to Step 4.
+- `STOP: physical.conf does not declare Driver "nvidia"` → stop and paste the Driver lines.
+  Do not force past this.
 
-## Step 4 — Install AnyDesk and set unattended access
+## Step 4 — Unplug the monitor, reboot (manual Step 6)
+
+```bash
+sudo reboot
+```
+
+Unplug any attached monitor first. This tests the headless path — with a monitor attached
+the unit would boot into physical mode and prove nothing about remote access.
+
+## Step 5 — Verify headless (manual Step 7)
+
+SSH back in, then:
+
+```bash
+./scripts/verify-display-mode.sh
+```
+
+- `switched to headless`, `XORG.CONF = HEADLESS`, a `LoadModule: "dummy"` line, `active`
+  twice, and AnyDesk shows the login screen → continue to Step 6.
+- `switched to physical` with no monitor attached → stop, paste the whole output.
+- Headless, but `gdm` not active or AnyDesk still black → stop, paste
+  `systemctl status gdm --no-pager`.
+
+## Step 6 — Install AnyDesk
 
 ```bash
 sudo ./scripts/install-anydesk.sh --set-password --open-firewall
 ```
 
-Drop `--open-firewall` if UFW is not in use on this unit. The script prints the AnyDesk ID at
-the end — copy it now.
+Drop `--open-firewall` if UFW is not in use. The script prints the AnyDesk ID — copy it.
 
-## Step 5 — Verify
+Skip this step if AnyDesk is already installed and registered on the unit; check with
+`anydesk --get-id`.
+
+## Step 7 — Live switch test (manual Step 8, needs someone at the unit)
+
+```bash
+journalctl -t display-mode -f
+```
+
+- Plug the monitor in → `switched to physical` within ~10 s, login screen on the monitor.
+- Nothing within 30 s → Ctrl+C, then with the monitor attached run
+  `sudo nvidia-xconfig --query-gpu-info | grep -E "Number of Display Devices|EDID Name"`
+  and paste it.
+- Unplug the monitor → `switched to headless` about 120 s later, AnyDesk works again.
+
+On a remote-only unit this step cannot be run. Record that in `UNIT-INVENTORY.md` rather
+than marking it passed.
+
+## Step 8 — Record the unit
 
 ```bash
 ./scripts/healthcheck.sh
 ```
 
-- Exit 0 → the unit is built. Go to Step 6.
-- Exit 1 → go to [`08-troubleshooting.md`](08-troubleshooting.md), Step 1, and work down.
-
-Then connect from your own machine's AnyDesk client using the printed ID and the unattended
-password. You should land on a 1920x1080 desktop. A black screen at this point means Step 5
-passed but capture did not — [`08-troubleshooting.md`](08-troubleshooting.md) Step 5.
-
-## Step 6 — Reboot test (do not skip)
-
-The whole point is that the unit comes back alone after a power event.
-
-```bash
-sudo reboot
-# wait ~90s
-ssh <admin>@<unit-address> './dgx-virtualscreen/scripts/healthcheck.sh'
-```
-
-- Exit 0 and AnyDesk reconnects without anyone touching the unit → done.
-- Exit 0 but AnyDesk shows the GDM greeter → autologin did not take. Re-run Step 3 with
-  `--autologin`, then repeat Step 6.
-- Exit 1 → the boot-time switcher did not run. [`08-troubleshooting.md`](08-troubleshooting.md)
-  Step 3.
-
-## Step 7 — Record the unit
-
-Add a row to [`../UNIT-INVENTORY.md`](../UNIT-INVENTORY.md) with hostname, OEM, physical
-access, AnyDesk ID, Tailscale IP, mode at rest, and today's date as `Last verified`. Commit
-and push. Store the unattended password in the team password manager — not in the repo.
+Add a row to [`../UNIT-INVENTORY.md`](../UNIT-INVENTORY.md) — hostname, OEM, physical
+access, AnyDesk ID, Tailscale IP, mode at rest, whether Step 7 was run, today's date.
+Commit and push. Password goes in the password manager, not the repo.
 
 ---
 
-## One-page command summary
+## One-page summary
 
 ```bash
 ssh <admin>@<unit>
 sudo systemctl enable --now ssh && tailscale ip -4
-git clone <repo-url> ~/dgx-virtualscreen && cd ~/dgx-virtualscreen
+git clone <repo-url> ~/dgx-display-mode && cd ~/dgx-display-mode
 sudo ./scripts/preflight.sh
-sudo ./scripts/install-virtual-display.sh --autologin <admin>
+sudo ./scripts/install-display-mode.sh
+# unplug monitor
+sudo reboot
+# ssh back in
+./scripts/verify-display-mode.sh
 sudo ./scripts/install-anydesk.sh --set-password --open-firewall
 ./scripts/healthcheck.sh
-sudo reboot
 
-# rollback, if the unit needs to go back to stock
-sudo ./scripts/uninstall.sh
+# rollback
+sudo ./scripts/rollback.sh
 ```

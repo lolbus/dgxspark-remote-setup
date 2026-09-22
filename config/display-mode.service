@@ -1,0 +1,14 @@
+[Unit]
+Description=Auto-switch dummy / physical X display
+After=systemd-modules-load.service nvidia-persistenced.service
+Before=display-manager.service gdm.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/sbin/display-mode.sh boot
+ExecStart=/usr/local/sbin/display-mode.sh watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target

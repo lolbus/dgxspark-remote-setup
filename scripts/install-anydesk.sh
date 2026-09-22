@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 #
 # install-anydesk.sh — AnyDesk arm64 install + unattended access on a headless unit.
+#
+# NOT part of the validated procedure in Manual-Direct-commands.txt, which covers
+# the display switching only. The package URL and CLI here are from AnyDesk's own
+# documentation; they have not been re-validated against dxclabs-dgxspark.
 # Idempotent: re-running upgrades the package and leaves an existing password alone
 # unless --set-password is given.
 #
@@ -50,12 +54,19 @@ say() { printf '\n>> %s\n' "$*"; }
 
 # A Wayland session cannot be captured by AnyDesk. Fail loudly rather than
 # leaving someone to debug a black screen later.
-say "Checking the display stack is X11"
-if grep -qiE '^[[:space:]]*WaylandEnable[[:space:]]*=[[:space:]]*false' /etc/gdm3/custom.conf 2>/dev/null; then
-    echo "   OK: GDM is pinned to X11"
+say "Checking the display stack"
+if [[ -s /etc/X11/display-modes/physical.conf ]]; then
+    echo "   OK: display-mode is installed; Xorg is driving the screen"
 else
-    echo "   REFUSING: GDM is not pinned to X11. Run install-virtual-display.sh first." >&2
-    exit 2
+    echo "   WARNING: display-mode is not installed. On a headless unit AnyDesk will"
+    echo "            have no screen to capture. Run install-display-mode.sh first."
+fi
+if grep -qiE '^[[:space:]]*WaylandEnable[[:space:]]*=[[:space:]]*false' /etc/gdm3/custom.conf 2>/dev/null; then
+    echo "   GDM pinned to X11 (WaylandEnable=false)"
+else
+    echo "   NOTE: WaylandEnable is not set to false. The validated build did not need"
+    echo "         this, because an /etc/X11/xorg.conf is present and GDM uses X11."
+    echo "         If AnyDesk reports 'Display server is not supported', set it then."
 fi
 
 say "Downloading AnyDesk $ANYDESK_VERSION (arm64)"

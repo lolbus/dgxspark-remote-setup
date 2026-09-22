@@ -2,53 +2,49 @@
 
 ## Assumed already present on the unit
 
-These are taken as given. If any is missing, stop and fix it first — the rest of the runbook
-depends on them.
-
-- The unit itself, an NVIDIA GB10 box (DGX Spark class: Dell Pro Max GB10 or HP ZGX Nano GB10,
-  128 GB unified memory).
-- Its operating system already installed and booting (Ubuntu 24.04 ARM64 / DGX OS 7) with the
-  GNOME desktop and the GDM3 login manager.
-- A working administrator account with `sudo`.
-- Outbound internet through whatever proxy or firewall the site uses, for `apt` and for the
-  AnyDesk package download.
-- The NVIDIA driver already installed and `nvidia-smi` returning the GPU.
+- The unit itself, an NVIDIA GB10 box (DGX Spark class: Dell Pro Max GB10 or HP ZGX Nano
+  GB10, 128 GB unified memory), booting DGX OS / Ubuntu 24.04 ARM64 with GNOME on GDM.
+- An administrator account with `sudo`.
+- The NVIDIA driver installed, with `nvidia-smi` and `nvidia-xconfig` both working.
+- **An existing `/etc/X11/xorg.conf` that declares `Driver "nvidia"` and drives a real
+  monitor today.** Step 2 copies it to `physical.conf`; it is what the unit switches back to.
+  Without it there is nothing to return to and the installer stops.
+- Outbound internet for `apt` and the AnyDesk package.
 
 ## Required before you start
 
 | # | What it is, in plain terms | The specific thing |
 |---|---|---|
-| 1 | A shell on the unit that does **not** depend on the desktop, so a broken display config cannot lock you out | OpenSSH server running (`ssh` / `sshd` systemd unit) |
-| 2 | A network path to that shell that works from wherever you are, including off-site | Tailscale on the unit and on your machine (`tailscale`, the unit joined to your tailnet) — or a routed LAN/VPN address you can reach |
-| 3 | The remote-desktop client you will connect with afterwards | AnyDesk client on your own machine (any platform) |
-| 4 | The software framebuffer driver that provides the virtual screen | `xserver-xorg-video-dummy` (installed by the script; listed here so it appears in change requests) |
-| 5 | The small X utilities used to read and set the resolution over SSH | `x11-xserver-utils`, which provides `xrandr` (installed by the script) |
+| 1 | A shell that does not depend on the desktop, since every switch restarts GDM | OpenSSH server running (`ssh` / `sshd`) |
+| 2 | A network path to that shell that works off-site | Tailscale on the unit and on your machine, or a routed LAN/VPN address |
+| 3 | The tool the switcher uses to count monitors | `nvidia-xconfig` (ships with the NVIDIA driver) |
+| 4 | The software framebuffer driver that provides the headless screen | `xserver-xorg-video-dummy` (installed by Step 1) |
+| 5 | The remote-desktop client you will connect with | AnyDesk client on your own machine |
 | 6 | The remote-desktop server package for 64-bit ARM | `anydesk_8.0.4-1_arm64.deb` from `download.anydesk.com/rpi/` (downloaded by the script) |
-| 7 | Somewhere safe to keep the unattended-access password | The team password manager. **Not this repo** — `.gitignore` blocks the obvious filenames but the only real control is not writing it down here |
-| 8 | This repo on the unit | `git clone`, or `scp` the folder across if the unit has no git access |
+| 7 | Somewhere safe for the unattended-access password | The team password manager. **Not this repo** |
+| 8 | This repo on the unit | `git clone`, or `scp` the folder across |
 
-## Optional, for units somebody can physically reach
+## Optional, for the live-switch test only
 
 | # | What it is, in plain terms | The specific thing |
 |---|---|---|
-| 9 | A plug that makes the graphics port believe a monitor is attached, removing the need for any of this software | HDMI or DisplayPort EDID emulator / "dummy plug" (match the unit's port; DP on the Dell Pro Max GB10 — VERIFY-ON-UNIT) |
+| 9 | A monitor to plug in and pull out while watching the log | Any DP/HDMI monitor (the original build used a BenQ) |
 
-If you fit item 9, you still install the autoswitch — it simply stays in `physical` mode and
-does nothing. That keeps every unit on one identical config.
+Step 8 cannot be run without somebody at the unit. A remote-only box is built and verified
+on Steps 1–7 alone; the live-switch path stays untested there, which is worth recording in
+`UNIT-INVENTORY.md`.
 
 ## Information to have in hand
 
 | Field | Value | Reason |
 |---|---|---|
-| Unit hostname | e.g. `dxclabs-dgxspark` | Goes in `UNIT-INVENTORY.md`; also how you will tell two units apart in AnyDesk |
-| Admin username | e.g. `dxcadmin` | Needed for `--autologin`, and it is the account whose desktop AnyDesk will show |
-| Tailscale IP | e.g. `100.109.196.102` | Your recovery channel; record it before you change anything |
-| Autologin required? | yes / no | `yes` means the unit reaches a full desktop after reboot unattended. `no` means every reboot leaves you at the GDM greeter needing the account password typed over AnyDesk |
-| Unattended password | 12+ characters, stored in the password manager | The only barrier on an AnyDesk ID that is reachable from the internet |
-| UFW in use? | yes / no | If yes, TCP 7070 must be allowed for direct/LAN AnyDesk connections; relay-only still works without it |
+| Unit hostname | e.g. `dxclabs-dgxspark` | Goes in `UNIT-INVENTORY.md` |
+| Tailscale IP | e.g. `100.109.196.102` | Your recovery channel; record it before changing anything |
+| Unattended password | 12+ characters, in the password manager | The only barrier on an AnyDesk ID reachable from the internet |
+| Monitor behaviour on site | does it drop signal when powered off? | If yes, `UNPLUG_POLLS` needs raising or the box will go headless 120 s after someone switches the screen off |
 
 ## Hard stop
 
-`scripts/preflight.sh` exits non-zero and refuses to bless the unit if there is no active SSH
-server. Do not work around that check. A failed Xorg config on a remote-only unit with no SSH
-is a site visit, and on `dxclabs-dgxspark` there is no site to visit quickly.
+`scripts/preflight.sh` exits non-zero if there is no active SSH server, if `nvidia-xconfig`
+is missing, or if there is no `/etc/X11/xorg.conf` to save. Do not work around those checks —
+each one makes the switcher either unrecoverable or permanently wrong.
