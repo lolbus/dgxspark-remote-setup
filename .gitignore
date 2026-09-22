@@ -1,0 +1,31 @@
+# Local state captured from a unit — never commit
+*.local
+*.bak
+*.orig
+backup/
+collected/
+
+# Secrets — unattended-access passwords must not enter git history
+secrets
+secrets/
+*.secret
+*.pass
+anydesk-password*
+*.key
+*.pem
+
+# Captured EDID blobs are unit-specific hardware data
+*.bin
+edid/
+
+# Logs pulled off a unit for diagnosis
+*.log
+logs/
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
