@@ -1,0 +1,145 @@
+How to manually setup the adaptive driver (virtual when disconnected, physical when connected)
+Step 1: Install the dummy driver
+
+sudo apt install -y xserver-xorg-video-dummy
+
+Does: installs the Xorg fake-screen driver. | Aim: provides the headless screen.
+
+Step 2: Save the original config as the monitor-mode config
+
+sudo mkdir -p /etc/X11/display-modes && sudo cp -p /etc/X11/xorg.conf /etc/X11/display-modes/physical.conf && grep -n Driver /etc/X11/display-modes/physical.conf
+
+Does: copies the DGX OS xorg.conf that works with a real monitor today. | Aim: monitor mode uses the known-good config.
+
+Output shows Driver "nvidia" → continue to step 3.
+Anything else → stop and paste the output.
+
+Step 3: Write the headless config (the Dell dummy config)
+
+sudo tee /etc/X11/display-modes/headless.conf >/dev/null <<'EOF'
+Section "Device"
+    Identifier "Dummy"
+    Driver "dummy"
+    VideoRam 256000
+EndSection
+
+Section "Screen"
+    Identifier "DummyScreen"
+    Device "Dummy"
+    Monitor "DummyMonitor"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth 24
+        Modes "1920x1080"
+    EndSubSection
+EndSection
+
+Section "Monitor"
+    Identifier "DummyMonitor"
+    HorizSync 28.0-80.0
+    VertRefresh 48.0-75.0
+EndSection
+EOF
+
+Does: stores the Dell dummy screen as a standalone config. | Aim: headless mode is one file copied over /etc/X11/xorg.conf.
+
+Step 4: Write the switch script
+
+sudo tee /usr/local/sbin/display-mode.sh >/dev/null <<'EOF'
+#!/bin/bash
+# boot : choose xorg.conf before GDM starts
+# watch: poll for monitor plug/unplug, switch config, restart GDM
+DIR=/etc/X11/display-modes
+XCONF=/etc/X11/xorg.conf
+POLL=5           # seconds between checks
+PLUG_POLLS=2     # monitor seen 2 polls in a row (~10 s) -> physical
+UNPLUG_POLLS=24  # monitor gone 24 polls in a row (~120 s) -> headless
+
+monitor_present() {
+    local n
+    n=$(nvidia-xconfig --query-gpu-info 2>/dev/null | awk -F': *' '/Number of Display Devices/{print $2; exit}')
+    [ "${n:-0}" -gt 0 ] 2>/dev/null
+}
+current_mode() { cmp -s "$DIR/headless.conf" "$XCONF" && echo headless || echo physical; }
+set_mode() { cp "$DIR/$1.conf" "$XCONF"; logger -t display-mode "switched to $1"; }
+
+case "$1" in
+boot)
+    systemctl is-active --quiet gdm && exit 0   # only at real boot, not on watcher restart
+    for i in $(seq 1 30); do nvidia-smi -L >/dev/null 2>&1 && break; sleep 1; done
+    if monitor_present; then set_mode physical; else set_mode headless; fi
+    ;;
+watch)
+    seen=0; gone=0
+    while sleep "$POLL"; do
+        if monitor_present; then seen=$((seen+1)); gone=0; else gone=$((gone+1)); seen=0; fi
+        mode=$(current_mode)
+        if [ "$mode" = headless ] && [ "$seen" -ge "$PLUG_POLLS" ]; then
+            set_mode physical; systemctl restart gdm; seen=0
+        elif [ "$mode" = physical ] && [ "$gone" -ge "$UNPLUG_POLLS" ]; then
+            set_mode headless; systemctl restart gdm; gone=0
+        fi
+    done
+    ;;
+esac
+EOF
+sudo chmod +x /usr/local/sbin/display-mode.sh
+
+Does: boot picks the config from the monitor count before GDM starts. watch polls every 5 s and switches config and restarts GDM when the monitor state changes. | Aim: plugging or unplugging a monitor needs no manual action. The waiting periods stop brief signal blips from triggering a restart.
+
+Step 5: Install and enable the service
+
+sudo tee /etc/systemd/system/display-mode.service >/dev/null <<'EOF'
+[Unit]
+Description=Auto-switch dummy / physical X display
+After=systemd-modules-load.service nvidia-persistenced.service
+Before=display-manager.service gdm.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/sbin/display-mode.sh boot
+ExecStart=/usr/local/sbin/display-mode.sh watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target
+EOF
+sudo systemctl daemon-reload && sudo systemctl enable display-mode.service
+
+Does: runs the boot choice before GDM starts, then keeps the watcher running. | Aim: correct mode at every boot, plus live switching afterwards. Nothing changes until you reboot.
+
+Step 6: Unplug the BenQ, then reboot
+
+sudo reboot
+
+Does: restarts with no monitor attached. | Aim: tests the headless path first. With the BenQ attached, it would boot into monitor mode.
+
+Step 7: Verify headless mode (SSH back in)
+
+journalctl -t display-mode -b --no-pager; cmp -s /etc/X11/xorg.conf /etc/X11/display-modes/headless.conf && echo "XORG.CONF = HEADLESS"; grep -h 'LoadModule: "dummy"' /var/log/Xorg.0.log /var/lib/gdm3/.local/share/xorg/Xorg.0.log 2>/dev/null; systemctl is-active display-mode gdm
+
+Does: shows the switch log, the active config, whether Xorg loaded the dummy driver, and service state. | Aim: confirms the box booted headless on the dummy screen.
+
+Output shows switched to headless, XORG.CONF = HEADLESS, a LoadModule: "dummy" line and active twice, and AnyDesk shows the login screen → headless mode works. Continue to step 8.
+Output shows switched to physical with no monitor attached → stop and paste the output.
+Output shows headless, but gdm is not active or AnyDesk is still black → stop and paste the output of systemctl status gdm --no-pager.
+
+Step 8: Verify live switching (BenQ, on site)
+
+journalctl -t display-mode -f
+
+Does: follows the switch log live. | Aim: watch the switch happen while the BenQ is plugged in and out.
+
+Plug in the BenQ. switched to physical appears within about 10 s and the login screen shows on the BenQ → continue with the unplug test below.
+Nothing appears within 30 s → press Ctrl+C, run sudo nvidia-xconfig --query-gpu-info | grep -E "Number of Display Devices|EDID Name" with the BenQ attached, and paste the output.
+Unplug the BenQ. About 120 s later, switched to headless appears and AnyDesk works again → setup complete.
+
+Caveats
+
+Every switch restarts GDM, so any open desktop session (local or AnyDesk) is logged out. SSH, tmux, containers and model jobs are not affected.
+If the BenQ drops its connection signal when powered off, it counts as unplugged and the box switches to headless after 120 s. If that happens, raise UNPLUG_POLLS in the script.
+
+Rollback:
+
+sudo systemctl disable --now display-mode.service && sudo cp /etc/X11/display-modes/physical.conf /etc/X11/xorg.conf && sudo reboot
