@@ -1,8 +1,12 @@
+<p align="center">
+  <img src="personal_brand_materials/header.png" alt="Buildmanship — Deployment Guide" width="100%">
+</p>
+
 # DGX Spark — adaptive display + AnyDesk remote runbook
 
-Rapid, repeatable headless remote access for **NVIDIA DGX Spark / GB10 units on Ubuntu 24.04
-ARM64 (DGX OS)**: a dummy X screen when no monitor is attached, the unit's own monitor
-config when one is, switched automatically.
+Rapid, repeatable headless Any Desk remote access for **NVIDIA DGX Spark / GB10 units on Ubuntu 24.04
+ARM64 (DGX OS)**: Autonomously deploy a dummy X screen when no monitor is attached, the unit's own monitor
+config when one is present, switched automatically so that anydesk can connect to the screen available seamlessly for remote access work. Without it Anydesk remote access is not available if no physical monitor is connected to the DGX Spark.
 
 Point a new unit at [`docs/06-new-unit-runbook.md`](docs/06-new-unit-runbook.md).
 
