@@ -7,6 +7,17 @@ the steps restart the display manager and would cut your own session.
 If a step fails, stop and go to [`08-troubleshooting.md`](08-troubleshooting.md). Do not
 continue past a failed step hoping a later one fixes it.
 
+**Rollback, at any point from Step 3 onwards:**
+
+```bash
+sudo ./scripts/uninstall.sh      # DESTRUCTIVE: restarts the display manager
+```
+
+It restores the unit's original `/etc/X11/xorg.conf` and `/etc/gdm3/custom.conf` from
+`/var/backups/dgx-virtualscreen/`, removes the switcher and unmasks the sleep targets.
+AnyDesk is left installed. This returns the unit to stock — on a headless box that means
+no usable remote desktop, so it is how you get a clean base to re-run from, not a fix.
+
 ---
 
 ## Step 0 — Establish the recovery channel (before anything else)
@@ -56,7 +67,13 @@ sudo ./scripts/install-virtual-display.sh --autologin <admin-username>
 Drop `--autologin` only if this unit must show the GDM greeter on every reboot and somebody
 will type the account password remotely each time.
 
-The script ends by printing `current_mode=`. On a headless unit it must say `dummy`.
+The script ends by printing `current_mode=`.
+
+- On a headless unit it must say `dummy` → continue to Step 4.
+- It says `physical` on a unit with no monitor → phantom connector.
+  [`08-troubleshooting.md`](08-troubleshooting.md) Step 2.
+- The script aborted, or SSH survived but the unit is otherwise wedged → roll back with
+  `sudo ./scripts/uninstall.sh`, then diagnose before re-running Step 3.
 
 ## Step 4 — Install AnyDesk and set unattended access
 
@@ -115,4 +132,7 @@ sudo ./scripts/install-virtual-display.sh --autologin <admin>
 sudo ./scripts/install-anydesk.sh --set-password --open-firewall
 ./scripts/healthcheck.sh
 sudo reboot
+
+# rollback, if the unit needs to go back to stock
+sudo ./scripts/uninstall.sh
 ```

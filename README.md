@@ -68,6 +68,8 @@ sudo ./scripts/preflight.sh                 # reports, changes nothing
 sudo ./scripts/install-virtual-display.sh   # dummy screen + autoswitch + X11 forcing
 sudo ./scripts/install-anydesk.sh           # arm64 AnyDesk + unattended password
 ./scripts/healthcheck.sh                    # one-screen status, exit 0 = good
+
+sudo ./scripts/uninstall.sh                 # rollback to stock (DESTRUCTIVE)
 ```
 
 `scripts/install-anydesk.sh` prints the unit's AnyDesk ID at the end. Record it in

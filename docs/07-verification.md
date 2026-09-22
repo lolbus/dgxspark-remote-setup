@@ -58,3 +58,7 @@ sudo journalctl -u anydesk -n 50 --no-pager
 
 Criterion 3 is the one people skip. It is also the only one that proves the unit survives a
 power cut.
+
+If a unit cannot be made to pass, roll it back to stock with `sudo ./scripts/uninstall.sh`
+and re-run [`06-new-unit-runbook.md`](06-new-unit-runbook.md) from Step 2 rather than
+layering fixes on a half-built unit.
